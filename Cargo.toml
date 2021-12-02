@@ -5,6 +5,7 @@ members = [
 	"languages/elixir",
 	"languages/javascript/node",
 	"languages/javascript/wasm",
+	"languages/java",
 	"languages/python",
 	"languages/rust",
 	"languages/rust/examples/*",
