@@ -16,10 +16,12 @@ path = "lib.rs"
 
 [dev-dependencies]
 insta = "1"
+tempfile = "3"
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 csv = "1"
+hdf5 = {version = "0.8", optional = true }
 fast-float = "0.2"
 fnv = "1"
 ndarray = { version = "0.15", features = ["rayon"] }

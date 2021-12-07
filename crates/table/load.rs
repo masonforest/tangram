@@ -1,5 +1,9 @@
 use super::*;
 use anyhow::Result;
+use hdf5::types::CompoundType;
+use hdf5::types::TypeDescriptor;
+use hdf5::types::TypeDescriptor::Compound;
+use hdf5::H5Type;
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	path::Path,
@@ -7,11 +11,21 @@ use std::{
 use tangram_progress_counter::ProgressCounter;
 use tangram_zip::zip;
 
+#[derive(H5Type, Clone, PartialEq, Debug)]
+#[repr(C)]
+pub struct H5Item {
+	number: i64,
+}
 #[derive(Clone)]
 pub struct FromCsvOptions<'a> {
 	pub column_types: Option<BTreeMap<String, TableColumnType>>,
 	pub infer_options: InferOptions,
 	pub invalid_values: &'a [&'a str],
+}
+
+#[derive(Clone)]
+pub struct FromHdf5Options<'a> {
+	pub dataset: &'a str,
 }
 
 impl<'a> Default for FromCsvOptions<'a> {
@@ -33,6 +47,17 @@ impl Default for InferOptions {
 	fn default() -> InferOptions {
 		InferOptions {
 			enum_max_unique_values: 100,
+		}
+	}
+}
+
+impl TryFrom<hdf5::types::TypeDescriptor> for TableColumnType {
+	type Error = anyhow::Error;
+
+	fn try_from(ty: hdf5::types::TypeDescriptor) -> anyhow::Result<Self> {
+		match ty {
+			TypeDescriptor::Integer(_) => Ok(TableColumnType::Number),
+			_ => Err(anyhow::anyhow!("unknown hdf5 type")),
 		}
 	}
 }
@@ -236,6 +261,43 @@ impl Table {
 		handle_progress_event(LoadProgressEvent::LoadDone);
 		Ok(table)
 	}
+
+	pub fn from_hdf5(
+		file: &mut hdf5::File,
+		options: FromHdf5Options,
+		handle_progress_event: &mut impl FnMut(LoadProgressEvent),
+	) -> Result<Table> {
+		let ds = file.dataset(options.dataset)?;
+		let (column_names, column_types) = {
+			let column_names_and_types =
+				if let Compound(CompoundType { fields, .. }) = ds.dtype()?.to_descriptor()? {
+					fields
+						.iter()
+						.cloned()
+						.map(|field| Ok((Some(field.name), field.ty.try_into()?)))
+						.collect::<Result<Vec<(Option<String>, TableColumnType)>>>()?
+				} else {
+					anyhow::bail!("hdf5 datasets must be made up of compound types")
+				};
+
+			column_names_and_types.iter().cloned().unzip()
+		};
+		let mut table = Table::new(column_names, column_types);
+
+		ds.read_raw::<H5Item>()
+			.unwrap()
+			.iter()
+			.for_each(|value| match &mut table.columns[0] {
+				TableColumn::Number(column) => {
+					column.data.push(value.number as f32);
+				}
+				_ => unreachable!(),
+			});
+
+		handle_progress_event(LoadProgressEvent::LoadDone);
+
+		Ok(table)
+	}
 }
 
 #[derive(Clone, Debug)]
@@ -321,6 +383,47 @@ impl<'a> InferStats<'a> {
 			InferColumnType::Text => TableColumnType::Text,
 		}
 	}
+}
+
+#[test]
+fn test_hdf5() {
+	use ndarray::arr1;
+	use tempfile::tempdir;
+
+	let dir = tempdir().unwrap();
+	let file_path = dir.path().join("test.hd5");
+	let mut file = hdf5::File::create(&file_path).unwrap();
+	let group = file.create_group("data").unwrap();
+	let builder = group.new_dataset_builder();
+	builder
+		.with_data(&arr1(&[H5Item { number: 1 }, H5Item { number: 2 }]))
+		.create("numbers")
+		.unwrap();
+	let table = Table::from_hdf5(
+		&mut file,
+		FromHdf5Options {
+			dataset: "data/numbers",
+		},
+		&mut |_| {},
+	)
+	.unwrap();
+	insta::assert_debug_snapshot!(table, @r###"
+ Table {
+     columns: [
+         Number(
+             NumberTableColumn {
+                 name: Some(
+                     "number",
+                 ),
+                 data: [
+                     1.0,
+                     2.0,
+                 ],
+             },
+         ),
+     ],
+ }
+ "###);
 }
 
 #[test]
